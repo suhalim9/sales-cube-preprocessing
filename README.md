@@ -28,6 +28,8 @@ Built as a take-home for the Keye technical interview.
 
 ## A 30-second tour
 
+![Sales Cube Cleaning Tool demo](docs/demo.png)
+
 The app opens on a **gate** — a project-name input. With no auth in the demo, the project name acts as a lightweight namespace so state (files, manifests, audit logs) can be scoped without a user model. Recent projects are cached in localStorage so you don't have to retype. **Enter any project name to get started.**
 
 Inside the workspace, the workflow is a four-stage stepper:
