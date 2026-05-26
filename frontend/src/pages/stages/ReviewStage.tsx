@@ -3,7 +3,7 @@ import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-qu
 import { CheckCircle2 } from "lucide-react";
 import { getPreview, runDetection } from "@/api/client";
 import { Button } from "@/components/ui/button";
-import { DETECTOR_META } from "@/lib/detectors";
+import { DETECTOR_ACTION, DETECTOR_META } from "@/lib/detectors";
 import { cn } from "@/lib/utils";
 import { useSelections } from "@/state/selections";
 import { CubePane } from "./review/CubePane";
@@ -192,8 +192,22 @@ export function ReviewStage({
     return after;
   }, [detectionsPage, preview, sel.selections]);
 
+  // Picking the staged fix when the user clicks a cell:
+  // - From a detector tab (e.g. "Double-bookings"): use that detector's
+  //   primary action (DETECTOR_ACTION). Critical for overlapping cells —
+  //   a DBL+Outlier cell clicked from the DBL tab should default to
+  //   ``split_evenly`` even though the merged ``suggested_fix`` might be
+  //   ``set_to_zero``.
+  // - From the "All" tab (stagingAttribution is undefined): use the
+  //   server's merged suggested_fix.
+  function defaultFixFor(d: Detection): SuggestedFix {
+    if (stagingAttribution && d.flagged_by.includes(stagingAttribution)) {
+      return DETECTOR_ACTION[stagingAttribution].fix;
+    }
+    return d.suggested_fix;
+  }
   function onCellClick(d: Detection) {
-    sel.toggle(d.detection_id, d.suggested_fix, d.flagged_by, stagingAttribution);
+    sel.toggle(d.detection_id, defaultFixFor(d), d.flagged_by, stagingAttribution);
   }
 
   function pickFix(
@@ -208,9 +222,12 @@ export function ReviewStage({
   }
 
   function stageAllVisible() {
+    // Same tab-context logic as single-cell click: "Stage all" inside the
+    // Double-bookings tab should stage every cell as split_evenly, not as
+    // whatever the merged suggested_fix says.
     sel.stageMany(
       filteredDetections.map(
-        (d) => [d.detection_id, d.suggested_fix, d.flagged_by, stagingAttribution],
+        (d) => [d.detection_id, defaultFixFor(d), d.flagged_by, stagingAttribution],
       ),
     );
   }
@@ -221,7 +238,9 @@ export function ReviewStage({
   if (detecting || !detectionsPage || !preview) {
     return (
       <div className="max-w-md mx-auto p-12 text-center space-y-3 w-full">
-        <div className="text-sm text-muted-foreground">Running 4 detectors…</div>
+        <div className="text-sm text-muted-foreground">
+          {detecting ? "Detecting anomalies…" : "Loading review…"}
+        </div>
         <div className="h-1 bg-muted overflow-hidden rounded">
           <div className="h-full bg-primary animate-pulse" style={{ width: "60%" }} />
         </div>

@@ -61,13 +61,23 @@ export function StagedDetail({
           if (b.fix === "keep_as_is" && a.fix !== "keep_as_is") return -1;
           return 0;
         });
-        // Highlight the button matching the current staged (fix, attribution).
-        // If attribution wasn't captured (staged from "All"), match by fix
-        // against whichever option has the same fix.
-        const activeKey = (opt: (typeof options)[number]) =>
-          staged.attribution
-            ? opt.fix === staged.fix && opt.detector === staged.attribution
-            : opt.fix === staged.fix;
+        // Pick exactly one option to highlight so the user can see what's
+        // currently staged. Order of preference:
+        //   1. Exact (fix, attribution) match — what the user explicitly
+        //      picked or what was staged with attribution context.
+        //   2. First option matching just the fix — covers the case where
+        //      the staged attribution doesn't exist as a contributing
+        //      detector (e.g. cached suggested_fix from a different
+        //      detector). Without this fallback no button would highlight
+        //      and the bar would look "broken."
+        const exactOpt = staged.attribution
+          ? options.find(
+              (o) => o.fix === staged.fix && o.detector === staged.attribution,
+            )
+          : undefined;
+        const fallbackOpt = options.find((o) => o.fix === staged.fix);
+        const activeOpt = exactOpt ?? fallbackOpt;
+        const activeKey = (opt: (typeof options)[number]) => opt === activeOpt;
         return (
           <div key={d.detection_id} className="flex items-center gap-2">
             <span className="font-mono text-muted-foreground">
