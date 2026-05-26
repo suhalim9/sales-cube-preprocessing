@@ -232,7 +232,7 @@ export function ReviewStage({
     );
   }
   function unstageAllVisible() {
-    for (const d of filteredDetections) sel.unstage(d.detection_id);
+    sel.unstageMany(filteredDetections.map((d) => d.detection_id));
   }
 
   if (detecting || !detectionsPage || !preview) {

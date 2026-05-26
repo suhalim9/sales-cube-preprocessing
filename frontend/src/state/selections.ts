@@ -109,6 +109,15 @@ export function useSelections({ slug, fileId }: SelectionKey) {
     clear() {
       replace(new Map());
     },
+    unstageMany(ids: Iterable<string>) {
+      // Single Map clone, bulk delete, single notify. Naively looping
+      // `unstage()` was O(N²) — each call cloned the whole selections
+      // Map. On stress (923k staged), "Stage none" would freeze the
+      // browser for minutes; here it completes in milliseconds.
+      const next = new Map(getMap(key));
+      for (const id of ids) next.delete(id);
+      replace(next);
+    },
     stageMany(
       entries: Array<[string, SuggestedFix, AnomalyType[], AnomalyType | undefined]>,
     ) {
