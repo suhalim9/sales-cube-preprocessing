@@ -185,6 +185,45 @@ def test_detections_endpoint_after_detect(client: TestClient, happy_parquet_byte
     assert r.json()["total"] > 0
 
 
+def test_detections_and_preview_heal_from_sidecar_after_restart(
+    client: TestClient, happy_parquet_bytes
+):
+    """Simulates a Fly machine restart between /detect and the next call.
+    /detections and /preview must read the persisted S3 sidecar instead of
+    recomputing — otherwise the new counter-based detection_ids wouldn't
+    match what the frontend has staged, and every /apply selection would 400.
+    """
+    from app.api import routes
+
+    client.get("/api/projects/acme")
+    file_id = _upload(client, "acme", "sales.parquet", happy_parquet_bytes)
+    client.post(f"/api/projects/acme/files/{file_id}/parse", json={"filename": "sales.parquet"})
+
+    detect = client.post(f"/api/projects/acme/files/{file_id}/detect").json()
+    original_ids = [d["detection_id"] for d in detect["detections"]]
+    assert len(original_ids) > 0
+
+    # Wipe every in-process cache — equivalent to a machine restart.
+    routes._DETECTION_CACHE.clear()
+    routes._ANOMALY_ROW_CACHE.clear()
+    routes._DATAFRAME_CACHE.clear()
+
+    # /detections must come back with the EXACT same IDs from the sidecar.
+    r = client.get(f"/api/projects/acme/files/{file_id}/detections")
+    assert r.status_code == 200, r.text
+    healed_ids = [d["detection_id"] for d in r.json()["detections"]]
+    assert healed_ids == original_ids, "detection_ids must persist across restart"
+
+    # Clear again and check /preview with the detected-row filter — it should
+    # heal from the sidecar rather than 409-ing.
+    routes._DETECTION_CACHE.clear()
+    routes._ANOMALY_ROW_CACHE.clear()
+
+    r = client.get(f"/api/projects/acme/files/{file_id}/preview?detected=any")
+    assert r.status_code == 200, r.text
+    assert r.json()["total"] > 0
+
+
 # ---------------------------------------------------------------------------
 # Preview
 # ---------------------------------------------------------------------------
@@ -309,6 +348,48 @@ def test_schema_override_returns_validation(client: TestClient, happy_parquet_by
     assert r.status_code == 200
     body = r.json()
     assert any("non-numeric" in e for e in body["hard_errors"])
+
+
+def test_schema_get_surfaces_time_sort_warning_after_override(client: TestClient):
+    """After the user saves a schema override on a file whose on-disk time
+    columns weren't chronological, GET /schema must surface the auto-sort
+    soft warning. The validator against the pre-sorted override won't notice
+    the disorder; the GET route's secondary check against on-disk column
+    order is what surfaces it."""
+    df = pd.DataFrame({
+        "customer": ["A", "B", "C"],
+        "2022_5": [100.0, 200.0, 300.0],
+        "2022_1": [50.0, 80.0, 60.0],
+        "2022_3": [70.0, 90.0, 110.0],
+    })
+    buf = io.BytesIO()
+    df.to_parquet(buf, index=False, compression="snappy")
+    buf.seek(0)
+
+    client.get("/api/projects/acme")
+    file_id = _upload(client, "acme", "shuffled.parquet", buf.read())
+    client.post(
+        f"/api/projects/acme/files/{file_id}/parse",
+        json={"filename": "shuffled.parquet"},
+    )
+
+    # Persist the sorted override.
+    r = client.patch(
+        f"/api/projects/acme/files/{file_id}/schema",
+        json={
+            "id_columns": ["customer"],
+            "time_columns": ["2022_1", "2022_3", "2022_5"],
+            "measure_columns": ["2022_1", "2022_3", "2022_5"],
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    # GET /schema re-validates against the override AND does the on-disk
+    # chronology check — that's where the auto-sort warning lives.
+    r = client.get(f"/api/projects/acme/files/{file_id}/schema")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert any("chronological" in w for w in body["soft_warnings"])
 
 
 # ---------------------------------------------------------------------------

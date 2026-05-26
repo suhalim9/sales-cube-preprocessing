@@ -1,0 +1,28 @@
+app = "keye-backend"
+primary_region = "iad"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  # Keep one machine warm so cold starts don't add 10-30s to the first
+  # detect/apply call after idle. Cost is small for a single shared/perf VM.
+  min_machines_running = 1
+
+[[http_service.checks]]
+  path = "/healthz"
+  interval = "30s"
+  timeout = "5s"
+
+[[vm]]
+  # performance-2x with 8 GB. Apply on stress.parquet with all ~923k anomalies
+  # staged peaks around 3.8 GB (large audit list + JSON serialization buffer).
+  # 4 GB was right on the edge and OOM-killed; 8 GB gives safe headroom plus
+  # room for other in-process caches. Streaming the audit log would let this
+  # drop back to ~1.5 GB but that's a deferred refactor — see ROADMAP.
+  cpu_kind = "performance"
+  cpus = 2
+  memory_mb = 8192

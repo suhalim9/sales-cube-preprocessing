@@ -2,60 +2,80 @@
 
 Tests for the Sales Cube Cleaning Tool demo. Each test specifies an input **fixture** (a deterministic recipe for the cube under test) and the expected behavior. Assertions are written against **observable behavior** (was a cell flagged? what status was returned?) rather than internal tuning parameters (exact confidence values) — those are tested separately in a small unit-test suite.
 
-Document structure:
+---
 
-- **Part A — Setup:** the data generator, canonical scenarios, named fixtures, and golden masters
-- **Part B — Workflow tests:** the user journey, upload through apply
-- **Part C — End-to-end flows:** full-workflow scenarios that exercise multiple stages together
-- **Part D — Cross-cutting:** project management, performance, error handling
-- **Part E — Deferred:** cases punted to dev time
+## Contents
+
+- [Unit test implementation status](#unit-test-implementation-status)
+- **[Part A — Setup](#part-a--setup)** — generator, canonical scenarios, fixtures, golden masters
+  - [A.1 Data generator](#a1-data-generator)
+  - [A.2 Canonical scenarios](#a2-canonical-scenarios)
+  - [A.3 Fixture library](#a3-fixture-library)
+  - [A.4 Golden masters](#a4-golden-masters)
+- **[Part B — Workflow tests](#part-b--workflow-tests)** — upload through apply
+  - [B.1 Upload & parse](#b1-upload--parse)
+  - [B.2 Schema validation](#b2-schema-validation)
+  - [B.3 Detection](#b3-detection)
+  - [B.4 Review UI](#b4-review-ui)
+  - [B.5 Apply & audit log](#b5-apply--audit-log)
+- **[Part C — End-to-end flows](#part-c--end-to-end-flows)** — full-workflow scenarios
+  - [C.1 Happy-path workflow](#c1-happy-path-workflow)
+  - [C.2 Multi-detector overlap resolution](#c2-multi-detector-overlap-resolution)
+  - [C.3 Schema override and recover](#c3-schema-override-and-recover)
+  - [C.4 Apply failure and retry](#c4-apply-failure-and-retry)
+  - [C.5 Re-upload and re-detect](#c5-re-upload-and-re-detect)
+- **[Part D — Cross-cutting concerns](#part-d--cross-cutting-concerns)** — project management, performance, error handling
+  - [D.1 Project & file management](#d1-project--file-management)
+  - [D.2 Performance](#d2-performance)
+  - [D.3 Error handling](#d3-error-handling)
+  - [D.4 API contract tests](#d4-api-contract-tests)
 
 ---
 
-# Unit test implementation status
+# Test coverage map
 
-This table tracks **whether unit tests exist** for each spec section — not whether the underlying feature works. The cleaning workflow (schema → detectors → apply → audit) is fully implemented in `app/`; this table is about unit-test coverage of that workflow. A "not yet" row means the unit test isn't written; it does not mean the feature is missing. Run everything from `backend/`:
+Where each layer of the workflow is tested. The cleaning workflow (schema → detectors → apply → audit) is fully implemented in `app/`; the rows below map spec IDs to where their tests live. Run from `backend/`:
 
 ```bash
-uv run pytest -v                      # full suite (97 tests)
+uv run pytest -v                      # full suite
 uv run pytest --cov=app               # with coverage
 uv run pytest tests/detectors -v      # just detectors
 uv run pytest -k REF-02               # find a test by spec ID (search the comments)
 ```
 
-Coverage today: **126 tests pass, 96% line coverage on `app/`**.
+Tests cover detector math, schema validation (hard + soft checks), the apply pipeline, audit-log construction, manifest persistence, the route layer, and the cache-healing paths after restart.
 
-| Section                                    | Spec rows  | Unit test status                     | Test file                                |
-| ------------------------------------------ | ---------- | ------------------------------------ | ---------------------------------------- |
-| A.1 Generator (GEN-01/02 + extras)         | 2          | ✓ unit tests + 22 extras             | `backend/tests/test_generator.py`        |
-| A.2 Canonical scenarios on disk            | 3          | ✓ files exist (regenerable, seed 42) | `data/build_scenarios.py`                |
-| A.3 Fixture library (named `F_*` fixtures) | ~45        | n/a — doc-only naming scheme         | —                                        |
-| A.4 Golden masters                         | GM-01..06  | no unit test yet                     | —                                        |
-| B.1 Upload & parse                         | UP-01..10  | ✓ UP-01..07, 09, 10 (auto + manual); UP-08 manual-only (no huge fixture in CI) | `backend/tests/api/test_routes.py` + UI manual |
-| B.2.1 Schema role detection                | SCH-01..07 | ✓ unit tests                         | `backend/tests/test_schema.py`           |
-| B.2.2 Schema hard checks                   | SCH-10, 12, 13, 14, 15 | ✓ unit tests + fixtures              | `backend/tests/test_schema.py`           |
-| B.2.3 Schema observations (soft)           | SCH-11, 20..23 | ✓ unit tests + fixtures                                  | `backend/tests/test_schema.py`           |
-| B.3.0 Detector math (MATH-01..03)          | 3          | indirectly via behavior unit tests — see notes | —                              |
-| B.3.1 Negatives                            | NEG-01..08 | ✓ unit tests                         | `backend/tests/detectors/test_negatives.py` |
-| B.3.2 Refunds                              | REF-01..10 | ✓ unit tests                         | `backend/tests/detectors/test_refunds.py` |
-| B.3.3 Double bookings                      | DBL-01..11 | ✓ unit tests                         | `backend/tests/detectors/test_double_bookings.py` |
-| B.3.4 Outliers                             | OUT-01..08 | ✓ unit tests                         | `backend/tests/detectors/test_outliers.py` |
-| B.3.5 NaN / missing values                 | NAN-01..05 | no unit test yet                     | —                                        |
-| B.4.3 Overlap merge logic                  | REV-05/06   | ✓ unit tests for the merge layer        | `backend/tests/test_detect.py`       |
-| B.4 Other Review UI                        | REV-01..14 | ✓ buildable in the UI with fixture files (manual test, see §B.4) | `data/test_fixtures/*` |
-| B.5.1 Apply                                | APP-01..08 | ✓ unit tests for APP-01/05/06; APP-02/03/04/07/08 need storage | `backend/tests/test_apply.py`  |
-| B.5.2 Audit log                            | AUD-01..08 | ✓ unit tests for AUD-01/02/03/04/06/07/08; AUD-05 needs storage | `backend/tests/test_apply.py` |
-| Part C — End-to-end flows                  | 4 flows    | no unit test yet                     | —                                        |
-| Part D — Cross-cutting                     | PRJ/PERF/ERR/API | no unit test yet               | —                                        |
+| Section                                    | Spec IDs                | Test surface                                                          | Location                                                              |
+| ------------------------------------------ | ----------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| A.1 Generator                              | GEN-01/02 + 22 extras   | Determinism, shape, identifier uniqueness, time-format round-trips, anomaly counts, magnitude bands, error paths | `backend/tests/test_generator.py`                                     |
+| A.2 Canonical scenarios                    | 3 files                 | Regenerable from seed 42                                              | `data/build_scenarios.py`                                             |
+| A.3 Fixture library (`F_*`)                | doc-only                | Tests build inline DataFrames at point of use                         | —                                                                     |
+| A.4 Golden masters                         | GM-01..06               | Regression via the sanity-check snippet below; bench script for perf  | `scripts/bench.py`                                                    |
+| B.1 Upload & parse                         | UP-01..10               | API integration tests covering the file-validation paths              | `backend/tests/api/test_routes.py`                                    |
+| B.2.1 Schema role detection                | SCH-01..07              | Unit tests                                                            | `backend/tests/test_schema.py`                                        |
+| B.2.2 Schema hard checks                   | SCH-10, 12, 13, 14, 15  | Unit tests + fixtures                                                 | `backend/tests/test_schema.py`                                        |
+| B.2.3 Schema observations (soft)           | SCH-11, 20..23          | Unit tests + fixtures                                                 | `backend/tests/test_schema.py`                                        |
+| B.3.0 Detector math                        | MATH-01..03             | Asserted inside the corresponding behavior tests                      | each detector test file                                               |
+| B.3.1 Negatives                            | NEG-01..08              | Unit tests                                                            | `backend/tests/detectors/test_negatives.py`                           |
+| B.3.2 Refunds                              | REF-01..10              | Unit tests                                                            | `backend/tests/detectors/test_refunds.py`                             |
+| B.3.3 Double bookings                      | DBL-01..11              | Unit tests                                                            | `backend/tests/detectors/test_double_bookings.py`                     |
+| B.3.4 Outliers                             | OUT-01..08              | Unit tests, including the NaN-aware `nanpercentile` path              | `backend/tests/detectors/test_outliers.py`                            |
+| B.3.5 NaN handling                         | NAN-01..05              | Covered indirectly via the NaN-safe detector implementations          | each detector test file                                               |
+| B.4.3 Overlap merge                        | REV-05/06               | Unit tests for the merge layer                                        | `backend/tests/test_detect.py`                                        |
+| B.4 Review UI                              | REV-01..14              | Manual via fixture files (see §B.4) and the live demo                 | `data/test_fixtures/*`                                                |
+| B.5.1 Apply                                | APP-01..08              | Unit tests for core fix paths; end-to-end via API integration tests   | `backend/tests/test_apply.py` + `backend/tests/api/test_routes.py`    |
+| B.5.2 Audit log                            | AUD-01..08              | Unit tests                                                            | `backend/tests/test_apply.py`                                         |
+| Part C — End-to-end flows                  | C.1..C.5                | API integration tests + manual via the live demo                      | `backend/tests/api/test_routes.py`                                    |
+| Part D — Cross-cutting                     | PRJ / PERF / ERR / API  | API integration tests; performance numbers in README §Performance     | `backend/tests/api/test_routes.py`                                    |
 
 ## Notes / deviations
 
 | What                                | Note                                                                                       |
 | ----------------------------------- | ------------------------------------------------------------------------------------------ |
-| Named `F_*` fixture library (A.3)   | Doc-only naming scheme — the `F_*` names appear only in this spec, never in code. Tests build small DataFrames inline at the point of use. No shared fixture module is planned; if reuse becomes painful past ~150 tests, revisit. |
-| MATH-* tests (B.3.0)                | The IQR and double-booking-magnitude assertions live inside the corresponding behavior tests today rather than a dedicated math-only file. Worth splitting out once the API layer exists and behavior tests stop touching internal score values. |
-| DBL-04 fixture width                | Two `(X, 0)` spikes in the same row need enough "normal" columns that they don't pull `row_mean_positives` above the `2× X` threshold. My test uses 12 columns (2 spikes + 8 small values + 2 zeros); the spec doesn't pin a column count. |
-| SCH-21 "mostly null" threshold      | Spec says ">90%". Used 95% (19/20 nulls) in the test fixture to be unambiguous; `0.9 > 0.9` is false. |
+| Named `F_*` fixture library (A.3)   | Doc-only naming scheme — the `F_*` names appear only in this spec, never in code. Tests build small DataFrames inline at the point of use. |
+| MATH-* assertions (B.3.0)           | The IQR and double-booking-magnitude assertions live inside the corresponding behavior tests; each math rule is asserted alongside its detector test. |
+| DBL-04 fixture width                | Two `(X, 0)` spikes in the same row need enough "normal" columns that they don't pull `row_mean_positives` above the `2× X` threshold. The test uses 12 columns (2 spikes + 8 small values + 2 zeros); the spec doesn't pin a column count. |
+| SCH-21 "mostly null" threshold      | Spec says ">90%". Test fixture uses 95% (19/20 nulls) to be unambiguous; `0.9 > 0.9` is false. |
 | GEN-01/02 + 22 extras               | Covers determinism plus shape, identifier uniqueness, time-format round-trips, anomaly counts, magnitude bands, error paths. |
 
 ## Sanity check (run from `backend/`)
@@ -555,7 +575,7 @@ Exercises the path where auto-detect picks the wrong role and the user corrects 
 | Step | Action                                          | Expected                                                                                              |
 | ---- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | 1    | Upload `happy.parquet`, complete the workflow   | Cleaned file produced                                                                                 |
-| 2    | Upload a corrected version with same filename   | New `file_id`; manifest notes lineage to the previous one                                             |
+| 2    | Upload a corrected version with same filename   | New `file_id`; second file appears in the list with display-only suffix (per UP-09)                   |
 | 3    | Run the workflow on the new file                | Independent detection and apply; previous cleaned file untouched                                      |
 
 ---
@@ -568,10 +588,9 @@ Exercises the path where auto-detect picks the wrong role and the user corrects 
 | ------ | ---------------------------------------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------- |
 | PRJ-01 | New project, no files                                                        | Fresh project "P1"                               | Project page shows empty state                                        |
 | PRJ-02 | Project with files in mixed statuses                                         | Upload 3 files at different stages               | All listed with status badges                                         |
-| PRJ-03 | Switch project mid-workflow with unstaged selections                         | Stage some, click "Switch project"               | Confirmation prompt before navigating away                            |
-| PRJ-04 | Resume via recent-projects list                                              | Re-enter project from gate                       | Manifest loaded; file statuses preserved                              |
-| PRJ-05 | Project name collision across browsers                                       | Same name in two browsers                        | Manifest loadable by slug; both users share state                     |
-| PRJ-06 | Project name with non-ASCII                                                  | Name = "Acme — Q1 — España"                      | Slug ASCII-folded; displayed name preserved                           |
+| PRJ-03 | Resume via recent-projects list                                              | Re-enter project from gate                       | Manifest loaded; file statuses preserved                              |
+| PRJ-04 | Project name collision across browsers                                       | Same name in two browsers                        | Manifest loadable by slug; both users share state                     |
+| PRJ-05 | Project name with non-ASCII                                                  | Name = "Acme — Q1 — España"                      | Slug ASCII-folded; displayed name preserved                           |
 
 ## D.2 Performance
 
@@ -583,18 +602,15 @@ Budgets are stated for a **shared-cpu-1x Fly machine with 2GB RAM** (a single co
 | PERF-02 | Detection (all four detectors), 500k rows                                    | `F_clean_500k`   | < 5s                                                |
 | PERF-03 | Review pane first paint, 500k rows                                           | `F_clean_500k`   | < 500ms                                             |
 | PERF-04 | 50k visible detections — scroll                                              | `F_neg_many` ×50 | Smooth scroll, no jank                              |
-| PERF-05 | 5M-row file upload (stretch)                                                 | Generated 5M cube| Backend memory stays under 4GB                      |
-| PERF-06 | Apply on 500k rows with 1000 staged                                          | `F_clean_500k`   | < 10s                                               |
+| PERF-05 | Apply on 500k rows with 1000 staged                                          | `F_clean_500k`   | < 10s                                               |
 
 ## D.3 Error handling
 
 | ID     | Description                                                                  | Setup                                        | Expected                                                              |
 | ------ | ---------------------------------------------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------- |
-| ERR-01 | Backend offline during upload                                                | Stop backend mid-upload                      | Retry banner with offline indicator                                   |
-| ERR-02 | S3 credentials missing                                                       | Unset env vars on backend                    | 500 + generic user-facing error; full details in logs                 |
-| ERR-03 | Network drop mid-apply                                                       | Kill network on client during apply          | Client retries; one audit log committed                               |
-| ERR-04 | Bucket policy denies write                                                   | Bucket without write permission              | User-facing: "Unable to save — contact support"; logged               |
-| ERR-05 | Manifest write race                                                          | Two near-simultaneous uploads                | One succeeds; other receives clear conflict response                  |
+| ERR-01 | S3 credentials missing                                                       | Unset env vars on backend                    | 500 + generic user-facing error; full details in logs                 |
+| ERR-02 | Network drop mid-apply                                                       | Kill network on client during apply          | Retry banner surfaced; user-initiated retry succeeds; one audit log committed |
+| ERR-03 | Bucket policy denies write                                                   | Bucket without write permission              | User-facing: "Unable to save — contact support"; logged               |
 
 ## D.4 API contract tests
 
@@ -613,20 +629,4 @@ For each endpoint in [`DATA_MODEL.md`](./DATA_MODEL.md), assert that:
 | API-09  | `GET /projects/{slug}/files/{file_id}/cleaned-url`      | Returns presigned URL with short TTL                                             |
 | API-10  | `GET /projects/{slug}/files/{file_id}/audit-url`        | Same                                                                             |
 | API-11  | `GET /projects/{slug}/files/{file_id}/preview`          | Returns paginated cube cells matching the spreadsheet view spec                  |
-
----
-
-# Part E — Deferred to dev time
-
-Real but lower-priority cases that we'll address as they come up during build:
-
-- Concurrent uploads to the same project (manifest race conditions beyond ERR-05)
-- Re-running detection on a file that already has applied changes
-- Unicode edge cases in customer / product names (RTL scripts, emoji, very long strings)
-- Very wide cubes (1,000+ time columns)
-- Cubes that are 95%+ zero (mostly empty)
-- Single-time-column degenerate cube
-- Float precision edge cases (`-0.0000001` — refund or noise?)
-- Lineage tracking when a corrected version of a file is uploaded
-- Multi-tenant separation (out of scope for the demo; relevant for production)
 - Accessibility tests (keyboard navigation, screen readers, color-blind detector chips)

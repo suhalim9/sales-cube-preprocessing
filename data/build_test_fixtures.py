@@ -89,6 +89,16 @@ def main() -> None:
                 outliers={"count": 30},
             ),
         ),
+        (
+            "c2_overlap_triple.parquet",
+            "C2 · one row has a cell flagged by negative + refund + outlier (Customer_A / Product_X / 2022_12). Other rows are clean or single-detector for contrast.",
+            _build_c2_overlap_triple(),
+        ),
+        (
+            "c3_numeric_id.parquet",
+            "C3 · `customer_id` is int64 — auto-detect mis-classifies it as a measure. User flips it to identifier in the schema override modal, then detection runs cleanly.",
+            _build_c3_numeric_id(),
+        ),
 
         # ---- Time-format variants — exercise SCH-02..04 in the UI ----
         (
@@ -174,6 +184,83 @@ def main() -> None:
 
     print(f"\nAll fixtures written to {OUT}")
     print(f"To open in Finder: open {OUT}")
+
+
+def _build_c2_overlap_triple() -> pd.DataFrame:
+    """C2 fixture: one cell flagged by negative + refund + outlier.
+
+    Row 0 (Customer_A / Product_X) has positives ~100–140 across 11 periods
+    and -800 in `2022_12`. That cell trips:
+    - negative: value < 0
+    - refund: prior_balance (~1300) ≥ |-800|
+    - outlier: row IQR band ≈ [75, 150]; -800 is far below
+
+    Other rows kept simple so the overlap row stands out visually.
+    """
+    time_cols = [f"2022_{i + 1}" for i in range(12)]
+    rows = [
+        # Triple-overlap row — the cell under test is the last one.
+        {"customer": "Customer_A", "product_line": "Product_X",
+         "values": [120, 110, 95, 130, 105, 140, 100, 115, 125, 110, 120, -800]},
+        # Clean rows for visual contrast.
+        {"customer": "Customer_B", "product_line": "Product_X",
+         "values": [200, 210, 195, 220, 205, 215, 200, 210, 220, 205, 210, 215]},
+        {"customer": "Customer_C", "product_line": "Product_Y",
+         "values": [50, 55, 60, 58, 52, 57, 54, 56, 59, 53, 55, 58]},
+        # Single-detector negative (no prior balance, so not a refund).
+        {"customer": "Customer_D", "product_line": "Product_Y",
+         "values": [-50, 100, 110, 105, 95, 120, 100, 115, 110, 105, 100, 115]},
+        # Single-detector outlier (positive spike, no zero neighbor).
+        {"customer": "Customer_E", "product_line": "Product_Z",
+         "values": [100, 105, 110, 95, 100, 5000, 105, 100, 110, 95, 100, 105]},
+    ]
+    data: dict[str, list] = {"customer": [], "product_line": []}
+    for tc in time_cols:
+        data[tc] = []
+    for r in rows:
+        data["customer"].append(r["customer"])
+        data["product_line"].append(r["product_line"])
+        for tc, v in zip(time_cols, r["values"], strict=True):
+            data[tc].append(float(v))
+    return pd.DataFrame(data)
+
+
+def _build_c3_numeric_id() -> pd.DataFrame:
+    """C3 fixture: `customer_id` is int64, so the inference treats it as a measure.
+
+    Schema inference rule: any numeric column that isn't time-named becomes a
+    measure. To trip C3 we need an identifier column whose dtype is int.
+    The user has to flip its role to "identifier" in the override modal,
+    after which detection should run normally.
+
+    Includes a few injected anomalies so detection finds something post-override.
+    """
+    n = 10
+    time_cols = [f"2022_{i + 1}" for i in range(12)]
+    data: dict[str, list] = {
+        "customer_id": [1001 + i for i in range(n)],  # int64 → misclassified as measure
+        "product_line": [f"Product_{chr(65 + (i % 3))}" for i in range(n)],
+    }
+    # Baseline positive values per row, with a couple of injected negatives so
+    # the post-override detection has something to surface.
+    base = [
+        [100, 110, 95, 120, 105, 130, 100, 115, 125, 110, 120, 115],
+        [200, 210, 195, 220, 205, 215, 200, 210, 220, 205, 210, 215],
+        [50, -300, 60, 58, 52, 57, 54, 56, 59, 53, 55, 58],       # negative + refund-eligible
+        [80, 85, 90, 88, 82, 87, 84, 86, 89, 83, 85, -50],         # negative at end
+        [300, 305, 310, 295, 300, 305, 310, 295, 300, 305, 310, 295],
+        [40, 45, 50, 48, 42, 47, 44, 46, 49, 43, 45, 48],
+        [150, 160, 155, 170, 165, 160, 155, 170, 165, 160, 155, 170],
+        [70, 75, 80, 78, 72, 77, 74, 76, 79, 73, 75, 78],
+        [220, 225, 230, 215, 220, 225, 230, 215, 220, 225, 230, 215],
+        [90, 95, 100, 98, 92, 97, 94, 96, 99, 93, 95, 98],
+    ]
+    for tc in time_cols:
+        data[tc] = []
+    for row_values in base:
+        for tc, v in zip(time_cols, row_values, strict=True):
+            data[tc].append(float(v))
+    return pd.DataFrame(data)
 
 
 def _build_uniform_cube() -> pd.DataFrame:

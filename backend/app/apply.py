@@ -73,7 +73,17 @@ def apply_selections(
     project_slug: str = "demo",
     applied_at: datetime | None = None,
 ) -> ApplyResult:
-    """Apply selected fixes and return cleaned DataFrame + audit dict."""
+    """Apply selected fixes and return cleaned DataFrame + audit dict.
+
+    Bulked for large staged sets. The naive path was a ``df.at[r, c] = v``
+    per selection, which on 923k selections costs ~5s and churns a lot of
+    intermediate scalars. We split selections into four buckets by fix
+    type and process the dominant ``set_to_zero`` (non-refund) case via
+    a single ``df.loc[rows, col] = 0`` per column — roughly ~30 bulk
+    writes instead of ~900k single-cell writes. Refund cascades and
+    splits retain per-cell handling because they're inherently sequential
+    and the count is small.
+    """
     applied_at = applied_at or datetime.now(UTC)
     by_id: dict[str, Detection] = {d.detection_id: d for d in detections}
 
@@ -86,22 +96,126 @@ def apply_selections(
         "outlier": 0,
     }
 
+    # Pass 1: validate + attribute + bucket by (fix, needs-cascade).
+    # We keep small per-bucket lists rather than tagging each selection
+    # so the inner loops aren't doing per-iteration branching.
+    set_to_zero_simple: list[tuple[Detection, AnomalyType]] = []
+    set_to_zero_refund: list[tuple[Detection, AnomalyType]] = []
+    splits: list[tuple[Detection, AnomalyType]] = []
+    keeps: list[tuple[Detection, AnomalyType]] = []
     for sel in selections:
         det = by_id.get(sel.detection_id)
         if det is None:
             raise InvalidSelectionError(f"Unknown detection_id: {sel.detection_id}")
-
         allowed = {det.suggested_fix, *det.alternative_fixes}
         if sel.fix not in allowed:
             raise InvalidSelectionError(
                 f"Fix '{sel.fix}' not allowed for detection {sel.detection_id} "
                 f"(allowed: {sorted(allowed)})"
             )
-
         attribution = _attribute(det, sel.fix, sel.attribution)
-        new_changes = _apply_one(cleaned, df, det, sel.fix, measure_columns, attribution)
-        changes.extend(new_changes)
-        summary[attribution] += len(new_changes)
+        if sel.fix == "set_to_zero":
+            if attribution == "refund":
+                set_to_zero_refund.append((det, attribution))
+            else:
+                set_to_zero_simple.append((det, attribution))
+        elif sel.fix == "split_evenly":
+            splits.append((det, attribution))
+        elif sel.fix == "keep_as_is":
+            keeps.append((det, attribution))
+        else:
+            raise InvalidSelectionError(f"Unknown fix: {sel.fix}")
+
+    # Pass 2: bulk set_to_zero by column. Reading and writing in one call
+    # per column instead of per cell. Non-refund only — refund attribution
+    # also needs the cascade, which is handled in pass 3.
+    by_col: dict[str, list[tuple[Detection, AnomalyType]]] = {}
+    for det, attribution in set_to_zero_simple:
+        by_col.setdefault(det.column, []).append((det, attribution))
+    for col, items in by_col.items():
+        row_idxs = [det.row_idx for det, _ in items]
+        before_vals = df[col].iloc[row_idxs].tolist()
+        cleaned.loc[row_idxs, col] = 0.0
+        for (det, attribution), before in zip(items, before_vals, strict=True):
+            changes.append(_change_entry(
+                det, col, float(before), 0.0, "set_to_zero", attribution,
+                flagged=False, change_kind="primary",
+            ))
+            summary[attribution] += 1
+
+    # Pass 3: refund cells + cascades. Per-cell because each cascade walks
+    # backward through the same row, mutating earlier periods until the
+    # reversal is absorbed. Reads from ``cleaned`` so previously-applied
+    # mutations (including non-refund set_to_zero from pass 2) are visible
+    # — matches the original interleaved behavior.
+    for det, attribution in set_to_zero_refund:
+        before = float(cleaned.at[det.row_idx, det.column])
+        cleaned.at[det.row_idx, det.column] = 0.0
+        primary_id = str(uuid.uuid4())
+        changes.append(_change_entry(
+            det, det.column, before, 0.0, "set_to_zero", attribution,
+            flagged=False, change_kind="primary", change_id=primary_id,
+        ))
+        summary[attribution] += 1
+        remaining = -before
+        refund_idx = measure_columns.index(det.column)
+        for i in range(refund_idx - 1, -1, -1):
+            if remaining <= 0:
+                break
+            prev_col = measure_columns[i]
+            prev_val = float(cleaned.at[det.row_idx, prev_col])
+            if prev_val <= 0:
+                continue
+            absorbed = min(prev_val, remaining)
+            new_val = prev_val - absorbed
+            cleaned.at[det.row_idx, prev_col] = new_val
+            changes.append(_change_entry(
+                det, prev_col, prev_val, new_val, "set_to_zero", attribution,
+                flagged=False, change_kind="refund_cascade",
+                parent_change_id=primary_id,
+            ))
+            summary[attribution] += 1
+            remaining -= absorbed
+
+    # Pass 4: split_evenly. Per-cell because each split touches two cells
+    # and needs the zero-neighbor lookup against the original df.
+    for det, attribution in splits:
+        partner_col = _zero_neighbor(df, det, measure_columns)
+        if partner_col is None:
+            raise InvalidSelectionError(
+                f"Cannot split: '{det.column}' has no zero neighbor"
+            )
+        x = float(cleaned.at[det.row_idx, det.column])
+        y = float(cleaned.at[det.row_idx, partner_col])
+        earlier, later = _split_evenly(x)
+        cleaned.at[det.row_idx, det.column] = earlier
+        cleaned.at[det.row_idx, partner_col] = later
+        spike_idx = measure_columns.index(det.column)
+        partner_idx = measure_columns.index(partner_col)
+        if spike_idx < partner_idx:
+            changes.append(_change_entry(
+                det, det.column, x, earlier, "split_evenly", attribution, flagged=False,
+            ))
+            changes.append(_change_entry(
+                det, partner_col, y, later, "split_evenly", attribution, flagged=False,
+            ))
+        else:
+            changes.append(_change_entry(
+                det, partner_col, y, later, "split_evenly", attribution, flagged=False,
+            ))
+            changes.append(_change_entry(
+                det, det.column, x, earlier, "split_evenly", attribution, flagged=False,
+            ))
+        summary[attribution] += 2
+
+    # Pass 5: keep_as_is. No mutation, just an audit entry recording that
+    # the analyst reviewed and chose not to change.
+    for det, attribution in keeps:
+        before = float(cleaned.at[det.row_idx, det.column])
+        changes.append(_change_entry(
+            det, det.column, before, before, "keep_as_is", attribution, flagged=True,
+        ))
+        summary[attribution] += 1
 
     audit = {
         "file_id": file_id,
@@ -114,89 +228,8 @@ def apply_selections(
 
 
 # ---------------------------------------------------------------------------
-# Per-fix application
+# Internals
 # ---------------------------------------------------------------------------
-
-
-def _apply_one(
-    df: pd.DataFrame,
-    original: pd.DataFrame,
-    det: Detection,
-    fix: SuggestedFix,
-    measure_columns: list[str],
-    attribution: AnomalyType,
-) -> list[dict[str, Any]]:
-    """Mutate ``df`` (cleaned copy) for one selection; return audit entries.
-
-    ``original`` is the unmutated source DataFrame — used to locate a
-    detection's zero neighbor as it was *at detection time*. Without this,
-    an earlier selection's mutation can hide the neighbor a later split
-    expects to find."""
-    if fix == "set_to_zero":
-        before = float(df.at[det.row_idx, det.column])
-        df.at[det.row_idx, det.column] = 0.0
-        entries = [_change_entry(det, det.column, before, 0.0, fix, attribution, flagged=False)]
-        # Refund attribution: walk backward from the refund column, absorbing
-        # from positive cells until the reversal magnitude is exhausted. The
-        # detector guarantees enough cumulative balance exists, so the loop
-        # always completes. Most-recent-first matching mirrors how a refund
-        # reverses the closest prior sale activity.
-        if attribution == "refund":
-            remaining = -before  # positive magnitude to absorb
-            refund_idx = measure_columns.index(det.column)
-            for i in range(refund_idx - 1, -1, -1):
-                if remaining <= 0:
-                    break
-                prev_col = measure_columns[i]
-                prev_val = float(df.at[det.row_idx, prev_col])
-                if prev_val <= 0:
-                    continue
-                absorbed = min(prev_val, remaining)
-                new_val = prev_val - absorbed
-                df.at[det.row_idx, prev_col] = new_val
-                entries.append(
-                    _change_entry(det, prev_col, prev_val, new_val, fix, attribution, flagged=False)
-                )
-                remaining -= absorbed
-        return entries
-
-    if fix == "split_evenly":
-        # Find the zero neighbor — could be either side. Prefer the next
-        # column so left-to-right reading order matches the audit entries
-        # for the common (X, 0) case; fall back to the previous column for
-        # last-column spikes adjacent to a zero on the left (DBL-05).
-        partner_col = _zero_neighbor(original, det, measure_columns)
-        if partner_col is None:
-            raise InvalidSelectionError(
-                f"Cannot split: '{det.column}' has no zero neighbor"
-            )
-        x = float(df.at[det.row_idx, det.column])
-        y = float(df.at[det.row_idx, partner_col])
-        earlier, later = _split_evenly(x)
-        df.at[det.row_idx, det.column] = earlier
-        df.at[det.row_idx, partner_col] = later
-        # Order entries left-to-right so the audit reads in time order.
-        spike_idx = measure_columns.index(det.column)
-        partner_idx = measure_columns.index(partner_col)
-        if spike_idx < partner_idx:
-            entries = [
-                _change_entry(det, det.column, x, earlier, fix, attribution, flagged=False),
-                _change_entry(det, partner_col, y, later, fix, attribution, flagged=False),
-            ]
-        else:
-            entries = [
-                _change_entry(det, partner_col, y, later, fix, attribution, flagged=False),
-                _change_entry(det, det.column, x, earlier, fix, attribution, flagged=False),
-            ]
-        return entries
-
-    if fix == "keep_as_is":
-        # No value change; emit an audit entry so the analyst's review is
-        # recorded ("I saw this, chose not to change it").
-        before = float(df.at[det.row_idx, det.column])
-        return [_change_entry(det, det.column, before, before, fix, attribution, flagged=True)]
-
-    raise InvalidSelectionError(f"Unknown fix: {fix}")
 
 
 def _split_evenly(x: float) -> tuple[float, float]:
@@ -211,16 +244,6 @@ def _split_evenly(x: float) -> tuple[float, float]:
         return (float((n + 1) // 2), float(n // 2))
     half = x / 2.0
     return (half, half)
-
-
-def _next_column(col: str, measure_columns: list[str]) -> str | None:
-    try:
-        i = measure_columns.index(col)
-    except ValueError:
-        return None
-    if i + 1 >= len(measure_columns):
-        return None
-    return measure_columns[i + 1]
 
 
 def _zero_neighbor(
@@ -246,16 +269,6 @@ def _zero_neighbor(
     return None
 
 
-def _prev_column(col: str, measure_columns: list[str]) -> str | None:
-    try:
-        i = measure_columns.index(col)
-    except ValueError:
-        return None
-    if i == 0:
-        return None
-    return measure_columns[i - 1]
-
-
 # ---------------------------------------------------------------------------
 # Audit entry construction
 # ---------------------------------------------------------------------------
@@ -270,10 +283,14 @@ def _change_entry(
     attribution: AnomalyType,
     *,
     flagged: bool,
+    change_kind: str = "primary",
+    parent_change_id: str | None = None,
+    change_id: str | None = None,
 ) -> dict[str, Any]:
-    return {
-        "change_id": str(uuid.uuid4()),
+    entry: dict[str, Any] = {
+        "change_id": change_id or str(uuid.uuid4()),
         "anomaly_type": attribution,
+        "change_kind": change_kind,
         "row_key": det.row_key,
         "column": column,
         "value_before": before,
@@ -281,6 +298,9 @@ def _change_entry(
         "suggested_fix": fix,
         "flagged": flagged,
     }
+    if parent_change_id is not None:
+        entry["parent_change_id"] = parent_change_id
+    return entry
 
 
 def _attribute(

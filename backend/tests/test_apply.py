@@ -218,6 +218,17 @@ def test_overlap_neg_ref_attributes_to_refund_and_absorbs_backward():
     assert changes[0]["value_before"] == -1200.0 and changes[0]["value_after"] == 0.0
     assert changes[1]["value_before"] == 700.0 and changes[1]["value_after"] == 0.0
     assert changes[2]["value_before"] == 600.0 and changes[2]["value_after"] == 100.0
+    # Primary vs cascade discriminator (the m1 entry is informative: it absorbed
+    # 500 of the refund magnitude but ended at 100, not 0 — so without
+    # change_kind the audit reads as if the user picked "set_to_zero" on a cell
+    # that didn't end at zero).
+    assert changes[0]["change_kind"] == "primary"
+    assert changes[1]["change_kind"] == "refund_cascade"
+    assert changes[2]["change_kind"] == "refund_cascade"
+    assert "parent_change_id" not in changes[0]
+    primary_id = changes[0]["change_id"]
+    assert changes[1]["parent_change_id"] == primary_id
+    assert changes[2]["parent_change_id"] == primary_id
 
 
 def test_paired_refund_collapses_to_zero():

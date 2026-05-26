@@ -201,7 +201,7 @@ Synthetic data generator (`data/generator.py`) parameterized by row count, anoma
 
 - One virtualized table; one row per detected cell.
 - Color-coded flag chips per row showing the detector(s).
-- Filter chips at top to toggle detector types (multi-select).
+- Filter chips at top to toggle detector types (single-select today; multi-select is future work).
 - Clicking a cell stages it with its primary detector's default; the Staged-changes bar at the bottom shows one pill per detector that flagged the cell so the analyst can switch the attribution (and the action) before applying. Available actions: `Set to 0`, `Apply refund`, `Split evenly`, `Keep as is`.
 - "Select all visible" applies default action to filtered rows.
 
@@ -386,7 +386,7 @@ Action: **flag for review** (no value change). Outliers can be legitimate spikes
 | Layer        | Choice                                                                             | Reason                                                            |
 | ------------ | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
 | Frontend     | React + TypeScript + Vite + Tailwind + shadcn/ui + TanStack Table + TanStack Query | Standard stack, virtualized table is non-negotiable at 500k+ rows |
-| Backend      | FastAPI + Pandas + PyArrow + Pandera + boto3                                       | Vectorized detection, declarative schema validation               |
+| Backend      | FastAPI + Pandas + PyArrow + boto3                                                 | Vectorized detection; schema validation hand-rolled in `app/schema.py` because role inference sits on top of declarative checks |
 | Storage      | AWS S3                                                                             | Existing account; matches production target                       |
 | Hosting (FE) | Vercel Hobby                                                                       | Free, zero config                                                 |
 | Hosting (BE) | Fly.io                                                                             | ~$2/month, no cold starts, Docker deploy                          |
@@ -401,7 +401,7 @@ Full data model, S3 layout, manifest schema, audit log schema, and REST API cont
 
 ## 8. Test scenarios
 
-Test scenarios — including the parameterized data generator, canonical demo files, the full test matrix (upload, schema validation, per-detector detection cases, review UI, apply, error handling, audit log), and scenarios deferred to dev time — live in [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md).
+Test scenarios — including the parameterized data generator, canonical demo files, and the full test matrix (upload, schema validation, per-detector detection cases, review UI, apply, error handling, audit log) — live in [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md).
 
 ---
 
@@ -409,9 +409,9 @@ Test scenarios — including the parameterized data generator, canonical demo fi
 
 | Risk                                                          | Likelihood | Impact | Mitigation                                                                                                                                           |
 | ------------------------------------------------------------- | ---------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 5M-row file OOMs the Fly machine                              | Medium     | High   | 2GB machine size; chunked PyArrow reads for files >1M rows; explicit memory guardrails before detection runs.                                        |
-| Detection false positives erode trust (over-flagging refunds) | Medium     | Medium | Confidence threshold tunable per detector; user reviews each detection before applying; outlier detector is flag-only (no auto-fix).                 |
-| Detection misses real anomalies (under-flagging)              | Medium     | High   | Combined-signal scoring for refunds; outlier detector serves as the generic catch-all; "View data" drawer lets analyst eyeball.                      |
+| 5M-row file OOMs the Fly machine                              | Medium     | High   | 8 GB `performance-2x` machine, sized empirically (apply on 923k staged anomalies peaks ~3.8 GB during audit-log serialization). 5M not benchmarked; PyArrow row-group reads are wired in but not yet auto-triggered by row count; explicit memory guardrails are future work. |
+| Detection false positives erode trust (over-flagging refunds) | Medium     | Medium | User reviews each detection before applying; outlier detector is flag-only (no auto-fix); refund detector restricted to cases where prior balance covers the reversal. |
+| Detection misses real anomalies (under-flagging)              | Medium     | High   | Outlier detector serves as the generic catch-all for patterns the three explicit detectors miss; "View data" drawer lets the analyst eyeball.        |
 | Apply writes partial files to S3                              | Low        | High   | Write to staging key first, then copy + delete; rollback on any failure; verify both objects present before marking file `cleaned`.                  |
 | Cross-project leakage via guessed URLs                        | Medium     | Medium | All S3 ops scoped by project slug; presigned download URLs scoped per file with short TTL; called out as a known demo gap (real auth in production). |
 | Schema auto-detection misclassifies columns                   | High       | Low    | Visible confirmation step with override modal; the user always sees what was detected before proceeding.                                             |
@@ -422,67 +422,87 @@ Test scenarios — including the parameterized data generator, canonical demo fi
 
 ## 10. What's not in the demo
 
-### Out of scope (features not built)
+Organized by the *reason* something isn't here. Each sub-section answers a different question.
 
-- Authentication / user accounts (project name is identity)
-- Multi-user collaboration / file locking
-- CSV / Excel upload (Parquet only)
-- Custom anomaly rules engine (4 detectors hard-coded)
-- Cascading refunds / multi-period restatement
-- Version history of cleaned files / rollback
-- API surface beyond what the frontend uses
+### 10.1 Out of product scope
 
-### Dismissed from production grade
+These don't fit the demo's product premise (single-analyst diligence cube cleaning). Building them would require a different product direction, not just more time.
 
-What a real production deployment would need that we intentionally skip:
+- Multi-user collaboration on a single file
+- File-level locking and concurrent editing
+- Public API beyond what the frontend uses
+- Bulk file processing (apply same rules to a folder)
 
-- **Postgres + Celery + Redis** — manifest in S3 + sync apply is fine at demo scale
-- **OAuth/SSO + RBAC + multi-tenancy isolation** — project name is identity
-- **APM + structured logging + alerting** — stdout logs only
-- **Idempotency tokens + optimistic concurrency** — single-user assumption holds
-- **KMS-managed encryption + audit log immutability + retention policy** — S3 defaults only
-- **CI quality gates + SAST + dependency scanning** — auto-deploy on push, no gates
-- **Reconciliation checks at apply time** (total before == total after) — claimed in design, not enforced
-- **Undo / version history** — apply is one-way for the demo
+### 10.2 Production hardening
 
-### Implicit assumptions
+Each bullet is a deliberate demo-time simplification — and the swap a real deployment would make. These aren't future-work tasks; they're the demo-to-production deltas.
+
+- **Postgres** for state, replacing per-project `manifest.json` in S3.
+- **OAuth/SSO + RBAC + multi-tenant isolation**, replacing the project-name namespace.
+- **S3 Object Lock + KMS-managed encryption + retention policy** for the audit log, replacing S3 defaults.
+- **APM + structured logging + alerting**, replacing stdout logs.
+- **Idempotency tokens + optimistic concurrency** on manifest writes, replacing the single-user assumption.
+- **CI quality gates + SAST + dependency scanning**, replacing auto-deploy-on-push.
+- **Reconciliation checks at apply time** (total before == total after) — claimed in design, not enforced today.
+- **`Decimal` / fixed-point money math**, replacing `float64`. Matters once cubes carry multi-currency or allocation-derived sub-cent values.
+- **Memory guardrails + auto-triggered chunked Parquet reads** at 5M+ rows. The architecture is ready; the trigger logic is not.
+
+### 10.3 Future work — what I'd build next
+
+Listed roughly in priority order. The first five would be the natural next sprint; the rest are organized by area.
+
+**Top priority:**
+
+1. **Real auth** with `user_id` populated in the audit log (the schema field exists, just stubbed).
+2. **CSV / Excel ingestion** behind the same upload contract.
+3. **Saved review presets** ("accept all negatives under $X") reusable across files.
+4. **Apply on a background job queue (Celery + Redis)** so large staged sets don't block the request thread.
+5. **Outlier detector tuning** — learned per-column thresholds instead of per-row IQR.
+
+**Detection improvements:**
+
+- **Refund detection beyond row-local matching.** Today's detector flags a negative when the cumulative positive balance in the same row covers it, and the fix walks backward through that row absorbing from prior periods. Directions to grow it:
+  - **Magnitude scoring with confidence** — bring back signals like round-number reversal (`|x|` ≥ 1,000 and divisible by 100) and MoM drop as inputs to a confidence score, calibrated against labeled refunds.
+  - **Cross-row matching** — match a refund against sales for the same customer/product in *other* rows (e.g., refund booked under a different product line by mistake).
+  - **Cross-file context** — reconcile cube negatives against an actual transactional / GL refunds export. The cube alone can't tell you which invoice a refund maps to.
+  - **ML classifier** — once a labeled dataset exists, replace the heuristic with a trained model.
+  - The architecture already carries a continuous `confidence` value through the API and audit log, so a richer detector slots in without schema changes.
+- **Custom rules engine** (config-driven detectors).
+- **ML-based outlier detection** (Isolation Forest, autoencoders).
+- **Cross-file context** (reconcile refunds in `sales.parquet` against `gl-trial.parquet`).
+- **Float-precision detection threshold.** The negatives detector uses strict `< 0` with no epsilon, so tiny floats like `-0.0000001` are flagged. Worth tuning if real data has sub-cent measurement noise.
+
+**UX & workflow:**
+
+- **Polished error UX across all stages.** Backend returns proper HTTP codes (400/404/409/500), and the Apply stage has a detailed error banner (network / 5xx / conflict states with retry). Missing: a global React error boundary, a dedicated 404 route for unknown project slugs and bad URLs, and consistent error states on the earlier stages (Upload / Schema / Detect / Review).
+- **Audit log export as Excel** with embedded change history.
+- **Review UI enhancements:** multi-select filter chips (Negatives + Outliers together), and sort controls (`$` magnitude, customer, period, confidence). Today filtering is single-select and order follows row index.
+- **Invalidate staged selections on schema change.** Selections in `frontend/src/state/selections.ts` survive across stage navigation by design. If the user re-roles a measure column after staging, detection re-runs and old `detection_id`s go stale — selections should clear, and the `["detection-run", slug, fileId]` query should invalidate from SchemaStage's mutation success path. Pure navigation (no schema edit) should still preserve selections.
+- **Re-detection on cleaned files.** The frontend stepper routes cleaned files to the completion view, but the backend `/detect` endpoint has no guard against re-running on an applied file. Decide: enable with audit trail, or block at API layer.
+- **Undo / version history** for cleaned files (apply is one-way today).
+- **Comments / notes per change** for analyst → VP handoff.
+
+**Robustness:**
+
+- **Edge-case data shapes.** Explicit handling for Unicode-heavy identifiers (RTL scripts, emoji, very long strings), very wide cubes (1,000+ time columns), mostly-empty cubes (95%+ zero density), and single-time-column degenerate cubes. These mostly work or fail silently today but aren't covered as explicit cases.
+
+### 10.4 Implicit assumptions
+
+Environmental constraints the demo accepts.
 
 - Modern desktop browsers only (no mobile, no IE)
 - English UI only
 - Single currency per file
-- 64-bit floats, not `Decimal` (demo accuracy, not accounting-grade precision)
 - Trusted file contents (no malicious-payload defense)
 - One user per project at a time
 - Confidence thresholds are heuristic, not statistically calibrated
-
-### Future work (post-demo)
-
-- CSV / Excel upload (with sheet selection)
-- Real auth
-- Audit log as Excel sheet with embedded change history
-- Cascading refunds (propagate to original-sale period)
-- **Refund detection — beyond row-local matching.** Today's detector flags a negative when the cumulative positive balance in the same row covers it, and the fix walks backward through that row absorbing from prior periods. Directions to grow it:
-  - **Magnitude scoring with confidence** — bring back signals like round-number reversal (`|x|` ≥ 1,000 and divisible by 100) and MoM drop as inputs to a confidence score, calibrated against labeled refunds rather than hand-picked weights.
-  - **Cross-row matching** — match a refund against sales for the same customer/product in *other* rows (e.g., refund booked under a different product line by mistake).
-  - **Cross-file context** — reconcile cube negatives against an actual transactional / GL refunds export. The cube alone can't tell you which invoice a refund maps to; transactional data can.
-  - **ML classifier** — once a labeled dataset exists, replace the heuristic with a trained model using customer history, product seasonality, and refund timing as features.
-  - The architecture already carries a continuous `confidence` value through the API and audit log, so a richer detector slots in without schema changes.
-- **Review UI enhancements.** Multi-select detector filtering (Negatives + Outliers together, not one at a time), and sort controls (`$` magnitude, customer, period, confidence) over the staged-changes log and the cube preview. Today the left rail is single-select and order follows row index.
-- **Invalidate staged selections on schema change.** Selections in `frontend/src/state/selections.ts` are keyed by `(slug, fileId)` and survive across stage navigation by design. The corner case: if the user re-roles a measure column (or coerces) after staging, detection re-runs and the old `detection_id`s become stale — selections should be cleared and the `["detection-run", slug, fileId]` query invalidated from SchemaStage's mutation success path. Pure navigation (no schema edit) should still preserve selections.
-- Custom rules engine (config-driven detectors)
-- ML-based outlier detection (Isolation Forest, autoencoders)
-- Cross-file context (reconcile refunds in `sales.parquet` against `gl-trial.parquet`)
-- Comments / notes per change for VP handoff
-- Bulk file processing (apply same rules to a folder)
 
 ---
 
 ## 11. Open questions
 
-- Confidence threshold for refund detection (start 0.3, tune empirically on real revenue-diligence data).
-- Default action when an overlap's radio picker is shown — auto-select highest-priority detector, or force user choice?
+- Default action when a cell is flagged by multiple detectors with conflicting fixes — auto-select highest-priority detector, or force user choice?
 - Audit log granularity for outlier flags (one entry per cell vs. row-level compression).
-- Re-detection workflow: if a user uploads a corrected version of a file, new `file_id` with lineage tracking, or overwrite?
 
 ---
 

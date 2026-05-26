@@ -28,13 +28,19 @@ def detect_outliers(df: pd.DataFrame, measure_cols: list[str]) -> list[RawDetect
         return []
 
     values = df[measure_cols].to_numpy(dtype=float)
-    q1 = np.percentile(values, 25, axis=1, method="linear")
-    q3 = np.percentile(values, 75, axis=1, method="linear")
+    # ``nanpercentile`` rather than ``percentile`` so a single NaN cell in a
+    # row doesn't collapse q1/q3 to NaN and silently suppress every outlier
+    # in that row. Rows that are entirely NaN still get NaN bounds, which
+    # produces an all-False comparison — no detections, as intended.
+    with np.errstate(invalid="ignore"):
+        q1 = np.nanpercentile(values, 25, axis=1, method="linear")
+        q3 = np.nanpercentile(values, 75, axis=1, method="linear")
     iqr = q3 - q1
 
     lower = (q1 - 1.5 * iqr)[:, None]
     upper = (q3 + 1.5 * iqr)[:, None]
 
+    # NaN cells compare False against any bound, so they are never flagged.
     flagged = (values < lower) | (values > upper)
     rows, cols = np.where(flagged)
 

@@ -4,6 +4,17 @@ Reference doc for the data cleaning demo. Covers S3 layout, the per-project mani
 
 ---
 
+## Contents
+
+- [S3 layout](#s3-layout)
+- [Manifest schema (`manifest.json`)](#manifest-schema-manifestjson)
+- [Audit log schema (`audit.json`)](#audit-log-schema-auditjson)
+- [Detection contract](#detection-contract)
+- [REST API](#rest-api)
+- [Notes](#notes)
+
+---
+
 ## S3 layout
 
 ```
@@ -166,8 +177,10 @@ Base path: `/api`. All routes scoped to a `{project_slug}`.
 | `GET` | `/projects/{slug}` | Get project manifest (creates the project on first call) |
 | `POST` | `/projects/{slug}/files` | Initiate file upload; returns S3 presigned upload URL + `file_id` |
 | `POST` | `/projects/{slug}/files/{file_id}/parse` | Trigger parse + schema inference after upload completes |
+| `DELETE` | `/projects/{slug}/files/{file_id}` | Remove file from manifest + best-effort delete its S3 objects (idempotent) |
 | `GET` | `/projects/{slug}/files/{file_id}/schema` | Get detected schema |
 | `PATCH` | `/projects/{slug}/files/{file_id}/schema` | Override role assignments |
+| `POST` | `/projects/{slug}/files/{file_id}/coerce` | Coerce listed string columns to numeric in-place (rewrites the Parquet and re-validates) |
 | `POST` | `/projects/{slug}/files/{file_id}/detect` | Run all detectors |
 | `GET` | `/projects/{slug}/files/{file_id}/detections` | Paginated detections; query params: `filter`, `sort`, `cursor`, `limit` |
 | `POST` | `/projects/{slug}/files/{file_id}/apply` | Commit selected fixes (atomic) |

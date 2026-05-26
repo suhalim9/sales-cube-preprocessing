@@ -195,12 +195,13 @@ function InFlightProgress({ staged }: { staged: number }) {
   const mm = String(Math.floor(elapsed / 60)).padStart(1, "0");
   const ss = String(elapsed % 60).padStart(2, "0");
   // Loose buckets — actual time varies with the slowest of: backend compute,
-  // S3 upload of cleaned.parquet, S3 upload of audit.json.
+  // S3 upload of cleaned.parquet, S3 upload of audit.json. Numbers below are
+  // measured on the Fly performance-2x VM; demo CPU is slower than local.
   const expectation =
     staged > 100_000
-      ? "Large staged sets (100k+) take ~30-60s — most of that is writing the audit log to S3."
+      ? "Large staged sets (100k+) can take a few minutes — most of the wait is writing the audit log to S3."
       : staged > 10_000
-        ? "This usually takes 5-15s for staged sets at this size."
+        ? "This usually takes 10-30 seconds for staged sets at this size."
         : "This should finish in a few seconds.";
   return (
     <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900 space-y-1">

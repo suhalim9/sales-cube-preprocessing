@@ -50,6 +50,9 @@ class S3Storage:
     def audit_key(self, project_slug: str, file_id: str) -> str:
         return f"projects/{project_slug}/files/{file_id}/audit.json"
 
+    def detections_key(self, project_slug: str, file_id: str) -> str:
+        return f"projects/{project_slug}/files/{file_id}/detections.json"
+
     # ----- primitives -----------------------------------------------------
 
     def put_bytes(self, key: str, body: bytes, content_type: str = "application/octet-stream") -> None:

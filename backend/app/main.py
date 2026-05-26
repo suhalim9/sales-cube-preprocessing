@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from app.api.routes import router
 from app.config import get_settings
@@ -19,6 +20,13 @@ app = FastAPI(
     description="Backend for the cube-cleaning demo. See DATA_MODEL.md for the contract.",
 )
 
+# Compress responses larger than 1 KB. The detection list on stress.parquet
+# is ~50 MB of raw JSON (hundreds of thousands of detections); gzipping
+# cuts that to ~5 MB on the wire, which dominates transfer time on the
+# review pane's first load. Apply audit logs and large preview pages also
+# benefit. Browsers send Accept-Encoding: gzip by default so this is a
+# transparent win.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,

@@ -4,16 +4,37 @@ A living document. Update as decisions are made. Each assumption notes **what** 
 
 ---
 
+## Contents
+
+- [Project framing](#project-framing)
+- [Tech stack](#tech-stack)
+- [Hosting](#hosting)
+- [Data shape](#data-shape)
+- [Scale targets](#scale-targets)
+- [Anomaly types](#anomaly-types)
+- [Review-and-apply pattern (core mental model)](#review-and-apply-pattern-core-mental-model)
+- [Data scenarios to build](#data-scenarios-to-build)
+- [File formats](#file-formats)
+- [UX assumptions](#ux-assumptions)
+- [UI structure — three pages](#ui-structure--three-pages)
+- [Stage 3 — Unified review (cell-level)](#stage-3--unified-review-cell-level)
+- [Schema validation](#schema-validation)
+- [Project layout](#project-layout)
+- [Audit log](#audit-log)
+- [Open questions](#open-questions-still-to-decide)
+
+---
+
 ## Project framing
 
 - **Primary audience: interview at Keye.** Secondary audiences (PE customers, internal stakeholders) should also find the demo plausible — meaning the workflow should *feel* real, not just look like a coding exercise.
 - **Timeline: no fixed deadline, but ship soon.** Optimize for "good enough to present this week," not "production hardened."
-- **Goal of the demo:** show a credible end-to-end cleaning workflow across all three anomaly types — negative values, refunds, double-bookings.
+- **Goal of the demo:** show a credible end-to-end cleaning workflow across all four anomaly types — negative values, refunds, double-bookings, and (added beyond the brief) statistical outliers.
 
 ## Tech stack
 
 - **Frontend:** React + TypeScript + Vite + Tailwind + shadcn + TanStack Table + React Query.
-- **Backend:** FastAPI + Pandas + PyArrow + Pandera.
+- **Backend:** FastAPI + Pandas + PyArrow. Schema validation is hand-rolled in `app/schema.py` (Pandera was considered but the role-inference step on top of validation made a hand-rolled approach simpler).
 - **Storage:** AWS S3 (uses existing AWS account). Bucket per environment.
 - **Apply jobs:** Synchronous (no Celery/Redis for the demo — fine at 500k row scale; called out as production-time swap).
 - **No Postgres / no DB for the demo.** Selections live in process memory; audit log written to S3 alongside the cleaned file.
@@ -22,7 +43,7 @@ A living document. Update as decisions are made. Each assumption notes **what** 
 ## Hosting
 
 - **Frontend: Vercel Hobby** (free tier). Static React build deployed from the monorepo's `frontend/` dir.
-- **Backend: Fly.io** (~$2/month after $5 trial credit). Smallest machine: `shared-cpu-1x`, 256MB → bump to 512MB or 1GB if 500k-row detection is tight. Dockerized FastAPI app.
+- **Backend: Fly.io.** Deployed as `performance-2x` with 8 GB RAM. Apply on `stress.parquet` (~923k anomalies staged) peaks ~3.8 GB during audit-log JSON serialization, so 4 GB was on the edge; 8 GB gives safe headroom. Streaming the audit log would let this drop back to ~1.5 GB — deferred. Dockerized FastAPI app.
 - **Storage: AWS S3** (existing account). Backend signs uploads / reads via IAM credentials stored as Fly secrets.
 - **CI/CD:** GitHub Actions → Vercel auto-deploys on push; Fly deploys via `flyctl deploy` (manual or workflow).
 
@@ -30,7 +51,7 @@ A living document. Update as decisions are made. Each assumption notes **what** 
 
 - **Existing sample file is a PVM cube:** `customer × product_line × month`, 90 rows × 34 cols, months `2021_1` … `2023_8`, all values non-negative floats.
 - **The sample file is clean** — zero negatives, no obvious double-bookings, no refund markers. So the demo cannot run against it as-is.
-- **We will generate synthetic demo data** covering happy / edge / dirty / stress cases. The original cube is the visual reference (preserve its shape).
+- **We will generate synthetic demo data** covering happy / dirty / stress cases. The original cube is the visual reference (preserve its shape).
 
 ## Scale targets
 
@@ -76,13 +97,12 @@ The review-and-apply mechanic is identical across anomaly types. What differs is
 
 ## Data scenarios to build
 
-Build all four. Hand-craft synthetic cubes (deterministic seed):
+Build three. Hand-craft synthetic cubes (deterministic seed):
 - **Happy path** — small cube (~50–100 rows) with obvious, easy-to-explain anomalies for stage walkthrough.
-- **Edge cases** — refund + negative on the same cell, low-confidence double-bookings, ambiguous patterns, all-negative rows, etc.
 - **Dirty / realistic** — larger cube (~1k–5k rows) with mixed anomalies that feels like real diligence data.
-- **Stress test** — large cube (50k+ rows) to demonstrate streaming/perf.
+- **Stress test** — large cube (500k rows) to demonstrate streaming/perf.
 
-Each scenario shipped as its own `.parquet` in `data/scenarios/`.
+Each scenario shipped as its own `.parquet` in `data/scenarios/`. Edge-case patterns (refund + negative on the same cell, ambiguous double-bookings, all-negative rows) are covered by the `F_*` fixtures in `data/test_fixtures/` rather than a separate canonical scenario.
 
 ## File formats
 
@@ -123,16 +143,15 @@ A **"View data" drawer** is accessible from any stage — a right-side slide-ove
 
 The review screen is a single virtualized table where each row = one detected anomaly cell.
 
-- **Color flag column** shows which detector(s) hit the cell: 🟥 negative, 🟧 refund, 🟦 double-booking, 🟪 outlier. Multiple chips per row when overlap.
-- **Filter chips** at top toggle anomaly types (multi-select).
-- **Sort** by $ magnitude (default), customer, period, type, or confidence.
+- **Color flag column** shows which detector(s) hit the cell: 🟥 negative, 🟧 refund, 🟦 double-booking, 🟪 outlier. Multiple dots per row when overlap.
+- **Filter chips** at top toggle anomaly types (single-select today; multi-select listed as future work in ROADMAP §10).
+- **No sort controls** in the built UI; row order follows detection-index. Sort by magnitude / customer / period / confidence is future work.
 - **Action column adapts per row:** clicking a cell stages it with its primary detector's default action; the **Staged changes** bar at the bottom shows one pill per detector that flagged the cell (with `Keep as is` always rendered last as the conservative bail-out).
   - Negative-only → `Set to 0` · `Keep as is`.
   - Refund (with or without negative) → `Set to 0` · `Apply refund` · `Keep as is`. `Apply refund` triggers FIFO walk-back against prior positive periods.
   - Double-booking → `Split evenly` · `Keep as is`.
   - Outlier-only → `Keep as is` · `Set to 0`. Default is `Keep as is` — outliers may be legitimate spikes.
-- **Bulk actions:** Select all visible · Clear staged · Stage selections.
-- **No tabs, no per-anomaly views.** The flag column + filter chips replace anomaly-type navigation entirely.
+- **Bulk actions:** `Stage all visible` · `Unstage all visible` · `Clear staged`. The "all visible" labels respect the active filter chip.
 
 Finer details (exact wording of conflict labels, modal flows, edge-case action UIs, etc.) deferred to development — to be worked out as we build.
 
@@ -151,21 +170,11 @@ Finer details (exact wording of conflict labels, modal flows, edge-case action U
   - User must confirm before detection runs.
 - **Hard checks (block):** parseable file; ≥1 ID col; ≥1 measure col; ≥1 time col; no duplicate ID-tuple rows; not empty; measure columns coerce to numeric.
 - **Soft checks (warn):** all-zero rows, >90% null columns, non-contiguous time sequence, mixed dtypes in a column.
-- **Library: Pandera** for declarative schema rules. Custom logic for the role-inference layer that sits on top.
+- **Implementation: hand-rolled in `app/schema.py`.** Role inference and hard/soft checks are written as direct Pandas operations. Pandera was considered but the role-inference step sits on top of validation, which made a unified hand-rolled module simpler to maintain.
 
 ## Project layout
 
-Monorepo at project root:
-```
-/Users/kaylim/Documents/keye/
-  ├── backend/        FastAPI + Pandera + Pandas
-  ├── frontend/       React + TS + Vite + Tailwind + shadcn
-  ├── data/
-  │   ├── source/     Original parquet (the one we have)
-  │   └── scenarios/  Generated demo files (happy/edge/dirty/stress)
-  ├── ASSUMPTIONS.md
-  └── README.md       (added at the end of the build)
-```
+See the current layout in `README.md` — it's the canonical source.
 
 ## Audit log
 

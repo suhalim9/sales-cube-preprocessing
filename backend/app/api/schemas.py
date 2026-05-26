@@ -141,6 +141,11 @@ class ApplyResponse(BaseModel):
 
 class PreviewResponse(BaseModel):
     rows: list[dict[str, Any]]
+    # Original cube row index for each entry in ``rows``. Needed because
+    # ``/preview?detected=<type>`` returns a sparse subset (e.g. rows 17,
+    # 42, 103), so the array position can't be used as the cube row index
+    # — but detections are keyed by it.
+    row_indices: list[int]
     columns: list[str]
     cursor: str | None = None
     total: int
