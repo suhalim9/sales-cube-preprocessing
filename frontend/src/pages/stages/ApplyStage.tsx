@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Download, FileText } from "lucide-react";
+import { AlertCircle, CheckCircle2, Download, FileText } from "lucide-react";
 import { ApiError, applyFixes } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -149,6 +149,12 @@ export function ApplyStage({ slug, fileId }: { slug: string; fileId: string }) {
         action cannot be undone for the demo.
       </div>
 
+      {apply.isError && !(apply.error instanceof ApiError && apply.error.status === 409) && (
+        <ErrorBanner error={apply.error} onRetry={() => apply.mutate()} />
+      )}
+
+      {apply.isPending && <InFlightProgress staged={staged} />}
+
       <div className="flex items-center justify-between gap-3 pt-2">
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -167,6 +173,82 @@ export function ApplyStage({ slug, fileId }: { slug: string; fileId: string }) {
             : staged === 0
               ? "Finalize as-is →"
               : `Apply ${staged} change${staged === 1 ? "" : "s"}`}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// InFlightProgress: shown while apply is running. Just an elapsed timer plus
+// a hint about why this might take a while on large staged sets — keeps the
+// user from thinking the request is stuck. Real progress reporting would
+// need backend job streaming; this is the "set expectations" version.
+// ---------------------------------------------------------------------------
+
+function InFlightProgress({ staged }: { staged: number }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setElapsed((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const mm = String(Math.floor(elapsed / 60)).padStart(1, "0");
+  const ss = String(elapsed % 60).padStart(2, "0");
+  // Loose buckets — actual time varies with the slowest of: backend compute,
+  // S3 upload of cleaned.parquet, S3 upload of audit.json.
+  const expectation =
+    staged > 100_000
+      ? "Large staged sets (100k+) take ~30-60s — most of that is writing the audit log to S3."
+      : staged > 10_000
+        ? "This usually takes 5-15s for staged sets at this size."
+        : "This should finish in a few seconds.";
+  return (
+    <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900 space-y-1">
+      <div className="flex items-center gap-2">
+        <div className="size-2 rounded-full bg-blue-500 animate-pulse" />
+        <span className="font-medium">Applying…</span>
+        <span className="ml-auto font-mono tabular-nums text-xs">{mm}:{ss}</span>
+      </div>
+      <p className="text-xs text-blue-800/80">{expectation}</p>
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// ErrorBanner: surfaces apply failures with a friendly message.
+//
+// Three flavors of failure we want to distinguish:
+// - Network / CORS / backend died (ApiError status=0, code="network"): the
+//   backend stopped responding mid-request — usually OOM or restart. Tell
+//   the user explicitly so they don't think it's their internet.
+// - 400/500 with detail string from the server: surface the detail verbatim.
+// - Anything else: show the message as-is.
+// ---------------------------------------------------------------------------
+
+function ErrorBanner({ error, onRetry }: { error: Error; onRetry: () => void }) {
+  const isApi = error instanceof ApiError;
+  const isNetwork = isApi && (error as ApiError).status === 0;
+  const isServerError = isApi && (error as ApiError).status >= 500;
+  const title = isNetwork
+    ? "Server unavailable"
+    : isServerError
+      ? "Server error"
+      : "Apply failed";
+  const hint = isNetwork || isServerError
+    ? "This usually happens when the backend runs out of memory on very large staged sets. Try staging fewer changes (e.g., one detector tab at a time) and retry."
+    : null;
+  return (
+    <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900 space-y-2">
+      <div className="flex items-start gap-2">
+        <AlertCircle className="size-4 mt-0.5 shrink-0" />
+        <div className="flex-1 space-y-1 min-w-0">
+          <div className="font-medium">{title}</div>
+          <div className="text-xs break-words">{error.message}</div>
+          {hint && <div className="text-xs text-red-800/80">{hint}</div>}
+        </div>
+        <Button variant="outline" size="sm" onClick={onRetry}>
+          Retry
         </Button>
       </div>
     </div>

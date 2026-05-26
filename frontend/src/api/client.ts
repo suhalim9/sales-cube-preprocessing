@@ -78,11 +78,25 @@ async function api<T>(
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(init.json);
   }
-  const resp = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers,
-    body,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers,
+      body,
+    });
+  } catch (err) {
+    // fetch() rejects only on network failure — CORS blocked, DNS, connection
+    // reset, the backend crashed mid-request and Fly's proxy hung up, etc.
+    // Wrap these in ApiError with status 0 so callers don't have to
+    // distinguish ApiError from raw TypeError in their error handling.
+    // The browser console will still show the real CORS/network error.
+    throw new ApiError(
+      "Server unavailable. The backend isn't responding — it may have crashed or be restarting. Try again in a moment.",
+      0,
+      "network",
+    );
+  }
   if (!resp.ok) {
     let detail = `HTTP ${resp.status}`;
     try {

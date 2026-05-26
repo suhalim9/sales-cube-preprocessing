@@ -115,6 +115,21 @@ export function ReviewStage({
     activeTab === "all" ? undefined : activeTab;
 
   // Compute the "after" value for every cell that has a staged selection.
+  //
+  // Important: ``preview.rows[i]`` is indexed by array position, but ``d.row_idx``
+  // is the ORIGINAL cube row index. With server-side filtering (``?detected=…``)
+  // the two diverge — array position 0 might be cube row 17. Build a lookup
+  // by original index so refund cascades and split partner reads find the
+  // correct row regardless of which detector tab is active.
+  const rowByIdx = useMemo(() => {
+    const m = new Map<number, Record<string, string | number>>();
+    if (!preview) return m;
+    for (let i = 0; i < preview.rows.length; i++) {
+      m.set(preview.rowIndices[i], preview.rows[i]);
+    }
+    return m;
+  }, [preview]);
+
   const afterValues = useMemo(() => {
     const after = new Map<string, number>();
     if (!detectionsPage || !preview) return after;
@@ -138,10 +153,11 @@ export function ReviewStage({
         if (fix === "set_to_zero" && refundCascade) {
           const refundIdx = timeCols.indexOf(d.column);
           let remaining = -d.value;
+          const sourceRow = rowByIdx.get(d.row_idx);
           for (let i = refundIdx - 1; i >= 0 && remaining > 0; i--) {
             const priorCol = timeCols[i];
             const priorKey = `${d.row_idx}::${priorCol}`;
-            const current = after.get(priorKey) ?? preview.rows[d.row_idx]?.[priorCol];
+            const current = after.get(priorKey) ?? sourceRow?.[priorCol];
             if (typeof current !== "number" || current <= 0) continue;
             const absorbed = Math.min(current, remaining);
             after.set(priorKey, current - absorbed);
@@ -150,8 +166,9 @@ export function ReviewStage({
         }
       } else if (fix === "split_evenly") {
         const idx = timeCols.indexOf(d.column);
+        const sourceRow = rowByIdx.get(d.row_idx);
         const cellAt = (col: string): number => {
-          const v = preview.rows[d.row_idx!]?.[col];
+          const v = sourceRow?.[col];
           return typeof v === "number" ? v : Number(v ?? 0);
         };
         let partnerCol: string | null = null;
