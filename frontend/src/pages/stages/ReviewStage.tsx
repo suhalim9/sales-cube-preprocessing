@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { CheckCircle2 } from "lucide-react";
 import { getPreview, runDetection } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -49,6 +49,11 @@ export function ReviewStage({
     queryFn: ({ pageParam }) => getPreview(slug, fileId, pageParam, PREVIEW_PAGE_SIZE, detectedParam),
     getNextPageParam: (lastPage) =>
       lastPage.cursor != null ? Number(lastPage.cursor) : undefined,
+    // Keep the previous tab's data visible while the new tab's preview
+    // fetches in the background. Without this, switching tabs would unmount
+    // the cube panes and show the "Running 4 detectors…" loading screen
+    // even though detection is cached — it's only the preview reloading.
+    placeholderData: keepPreviousData,
   });
   // Flatten loaded pages into a single rows array + matching row indices.
   // ``row_indices[i]`` is the original cube row index for ``rows[i]``,
