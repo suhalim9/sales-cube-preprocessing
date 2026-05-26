@@ -18,14 +18,23 @@ export function StagedDetail({
   // unstage from one place. For cells flagged by more than one detector,
   // we render one button per detector — picking a button switches the
   // attribution (and therefore the action) the apply layer uses.
+  //
+  // Render cap: on stress.parquet (~hundreds of thousands of detections),
+  // rendering a DOM row per staged item locks the browser. Cap to
+  // ``MAX_VISIBLE`` and roll the rest into a one-line summary. The full
+  // selection set still applies on submit — only the inline preview is
+  // truncated.
+  const MAX_VISIBLE = 50;
   const stagedList = detections.filter((d) => selections.has(d.detection_id));
   if (stagedList.length === 0) return null;
+  const visibleStaged = stagedList.slice(0, MAX_VISIBLE);
+  const hiddenCount = stagedList.length - visibleStaged.length;
   return (
     <div className="border-t bg-muted/30 px-6 py-2 text-xs space-y-1.5 max-h-32 overflow-auto">
       <div className="text-muted-foreground">
         Staged changes ({stagedList.length}):
       </div>
-      {stagedList.map((d) => {
+      {visibleStaged.map((d) => {
         const staged = selections.get(d.detection_id)!;
         // Union of each detector's actions, deduped by label so we don't show
         // two identical buttons when multiple detectors offer the same thing
@@ -91,6 +100,11 @@ export function StagedDetail({
           </div>
         );
       })}
+      {hiddenCount > 0 && (
+        <div className="text-muted-foreground italic">
+          …and {hiddenCount.toLocaleString()} more staged (all will apply).
+        </div>
+      )}
     </div>
   );
 }

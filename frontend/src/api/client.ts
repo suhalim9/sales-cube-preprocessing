@@ -265,8 +265,10 @@ export async function getPreview(
   fileId: string,
   offset = 0,
   limit = 100,
+  detected?: string,
 ): Promise<PreviewPage> {
   const q = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  if (detected) q.set("detected", detected);
   return api<PreviewPage>(`/projects/${slug}/files/${fileId}/preview?${q}`);
 }
 

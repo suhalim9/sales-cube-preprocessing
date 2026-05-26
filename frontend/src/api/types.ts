@@ -74,6 +74,9 @@ export interface DetectionsPage {
 
 export interface PreviewPage {
   rows: Array<Record<string, string | number>>;
+  // Original cube row index for each entry in ``rows``. Differs from the array
+  // position when ``/preview?detected=<type>`` returns a sparse subset.
+  row_indices: number[];
   cursor: string | null;
   total: number;
   columns: string[];

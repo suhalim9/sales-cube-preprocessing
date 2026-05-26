@@ -28,24 +28,37 @@ export function ReviewStage({
     queryKey: ["detection-run", slug, fileId],
     queryFn: () => runDetection(slug, fileId),
   });
+  const sel = useSelections({ slug, fileId });
+  // Single-select tab. "all" shows every anomaly; a specific detector
+  // dims/hides cells that aren't flagged by it.
+  const [activeTab, setActiveTab] = useState<ActiveTab>("all");
+
   // Infinite-scroll preview. Backend returns ``cursor`` = next offset as a
   // string (or null when exhausted). Each page is PREVIEW_PAGE_SIZE rows;
   // pages are appended and rendered through the virtualizer in CubePane,
   // so memory stays bounded by the user's scroll depth.
+  //
+  // When a specific detector tab is active, the query keys on it and asks
+  // the backend to return only rows containing detections of that type
+  // (``?detected=<type>``). The "All" tab pages through the full cube as
+  // before.
+  const detectedParam = activeTab === "all" ? undefined : activeTab;
   const previewQuery = useInfiniteQuery({
-    queryKey: ["preview", slug, fileId],
+    queryKey: ["preview", slug, fileId, activeTab],
     initialPageParam: 0,
-    queryFn: ({ pageParam }) => getPreview(slug, fileId, pageParam, PREVIEW_PAGE_SIZE),
+    queryFn: ({ pageParam }) => getPreview(slug, fileId, pageParam, PREVIEW_PAGE_SIZE, detectedParam),
     getNextPageParam: (lastPage) =>
       lastPage.cursor != null ? Number(lastPage.cursor) : undefined,
   });
-  // Flatten loaded pages into a single rows array. We rebuild on each new
-  // page; the cost is dwarfed by the row render itself.
+  // Flatten loaded pages into a single rows array + matching row indices.
+  // ``row_indices[i]`` is the original cube row index for ``rows[i]``,
+  // critical when the server returns a sparse subset (anomaly-only view).
   const preview = useMemo(() => {
     if (!previewQuery.data) return undefined;
     const pages = previewQuery.data.pages;
     return {
       rows: pages.flatMap((p) => p.rows),
+      rowIndices: pages.flatMap((p) => p.row_indices),
       columns: pages[0]?.columns ?? [],
       total: pages[0]?.total ?? 0,
     };
@@ -55,11 +68,6 @@ export function ReviewStage({
       previewQuery.fetchNextPage();
     }
   }, [previewQuery]);
-
-  const sel = useSelections({ slug, fileId });
-  // Single-select tab. "all" shows every anomaly; a specific detector
-  // dims/hides cells that aren't flagged by it.
-  const [activeTab, setActiveTab] = useState<ActiveTab>("all");
 
   // Shared scroll refs so the two cube panes can sync lockstep. Declared
   // up here (above any conditional return) so hook order is stable.
@@ -89,24 +97,17 @@ export function ReviewStage({
     );
   }, [detectionsPage, activeFilters]);
 
-  // Rows to render in both panes. When a specific detector tab is active,
-  // hide rows that have no detection of that type — the user shouldn't have
-  // to scroll past clean rows when scoped to one anomaly. "All" shows
-  // everything. Each entry keeps its original row index so cell-level
-  // detection / afterValue lookups stay keyed against the full preview.
+  // Rows to render in both panes. The server already filtered to anomaly
+  // rows when the user picked a detector tab, so we just zip rows with
+  // their original cube indices. ``originalIdx`` is the cube row index —
+  // used to look up detections and after-values by ``${row}::${col}``.
   const visibleRows = useMemo(() => {
     if (!preview) return [];
-    const indexed = preview.rows.map((row, originalIdx) => ({ row, originalIdx }));
-    if (activeTab === "all") return indexed;
-    const rowsWithMatch = new Set<number>();
-    for (const d of detectionsPage?.detections ?? []) {
-      if (d.row_idx == null) continue;
-      if (d.flagged_by.some((t) => activeFilters.has(t))) {
-        rowsWithMatch.add(d.row_idx);
-      }
-    }
-    return indexed.filter(({ originalIdx }) => rowsWithMatch.has(originalIdx));
-  }, [preview, detectionsPage, activeTab, activeFilters]);
+    return preview.rows.map((row, i) => ({
+      row,
+      originalIdx: preview.rowIndices[i],
+    }));
+  }, [preview]);
 
   // Attribution captured at staging time — the left-rail tab the user was
   // looking at. "all" leaves it undefined so apply can pick a default.
