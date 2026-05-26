@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { CheckCircle2 } from "lucide-react";
 import { getPreview, runDetection } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import { StagedDetail } from "./review/StagedDetail";
 import type { AnomalyType, Detection, SuggestedFix } from "@/api/types";
 
 const ALL_DETECTORS: AnomalyType[] = ["negative", "refund", "double_booking", "outlier"];
+const PREVIEW_PAGE_SIZE = 100;
 
 type ActiveTab = "all" | AnomalyType;
 
@@ -27,10 +28,33 @@ export function ReviewStage({
     queryKey: ["detection-run", slug, fileId],
     queryFn: () => runDetection(slug, fileId),
   });
-  const { data: preview } = useQuery({
+  // Infinite-scroll preview. Backend returns ``cursor`` = next offset as a
+  // string (or null when exhausted). Each page is PREVIEW_PAGE_SIZE rows;
+  // pages are appended and rendered through the virtualizer in CubePane,
+  // so memory stays bounded by the user's scroll depth.
+  const previewQuery = useInfiniteQuery({
     queryKey: ["preview", slug, fileId],
-    queryFn: () => getPreview(slug, fileId),
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) => getPreview(slug, fileId, pageParam, PREVIEW_PAGE_SIZE),
+    getNextPageParam: (lastPage) =>
+      lastPage.cursor != null ? Number(lastPage.cursor) : undefined,
   });
+  // Flatten loaded pages into a single rows array. We rebuild on each new
+  // page; the cost is dwarfed by the row render itself.
+  const preview = useMemo(() => {
+    if (!previewQuery.data) return undefined;
+    const pages = previewQuery.data.pages;
+    return {
+      rows: pages.flatMap((p) => p.rows),
+      columns: pages[0]?.columns ?? [],
+      total: pages[0]?.total ?? 0,
+    };
+  }, [previewQuery.data]);
+  const loadNextPage = useCallback(() => {
+    if (previewQuery.hasNextPage && !previewQuery.isFetchingNextPage) {
+      previewQuery.fetchNextPage();
+    }
+  }, [previewQuery]);
 
   const sel = useSelections({ slug, fileId });
   // Single-select tab. "all" shows every anomaly; a specific detector
@@ -297,6 +321,8 @@ export function ReviewStage({
                 onCellClick={onCellClick}
                 scrollRef={beforeScrollRef}
                 siblingScrollRef={afterScrollRef}
+                onNearBottom={loadNextPage}
+                isLoadingMore={previewQuery.isFetchingNextPage}
               />
               <PaneDivider hasStaged={staged > 0} />
               <CubePane
@@ -313,6 +339,8 @@ export function ReviewStage({
                 onCellClick={onCellClick}
                 scrollRef={afterScrollRef}
                 siblingScrollRef={beforeScrollRef}
+                onNearBottom={loadNextPage}
+                isLoadingMore={previewQuery.isFetchingNextPage}
               />
             </div>
 

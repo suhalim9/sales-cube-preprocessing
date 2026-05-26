@@ -260,8 +260,14 @@ export async function getDetections(slug: string, fileId: string): Promise<Detec
   return api<DetectionsPage>(`/projects/${slug}/files/${fileId}/detections`);
 }
 
-export async function getPreview(slug: string, fileId: string): Promise<PreviewPage> {
-  return api<PreviewPage>(`/projects/${slug}/files/${fileId}/preview`);
+export async function getPreview(
+  slug: string,
+  fileId: string,
+  offset = 0,
+  limit = 100,
+): Promise<PreviewPage> {
+  const q = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  return api<PreviewPage>(`/projects/${slug}/files/${fileId}/preview?${q}`);
 }
 
 export async function deleteFile(slug: string, fileId: string): Promise<void> {

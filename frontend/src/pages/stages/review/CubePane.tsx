@@ -19,7 +19,14 @@ export interface CubePaneProps {
   onCellClick: (d: Detection) => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
   siblingScrollRef: React.RefObject<HTMLDivElement | null>;
+  // Called when scroll reaches near the bottom of the loaded rows. ReviewStage
+  // wires this to ``fetchNextPage`` on the infinite preview query. Safe to
+  // call on every scroll tick — the query layer dedupes inflight fetches.
+  onNearBottom?: () => void;
+  isLoadingMore?: boolean;
 }
+
+const NEAR_BOTTOM_PX = 240;
 
 export function CubePane({
   title,
@@ -35,6 +42,8 @@ export function CubePane({
   onCellClick,
   scrollRef,
   siblingScrollRef,
+  onNearBottom,
+  isLoadingMore,
 }: CubePaneProps) {
   const idCols = columns.slice(0, 2);
   const timeCols = columns.slice(2);
@@ -48,12 +57,20 @@ export function CubePane({
 
   // Lockstep scroll: mirror our scroll position into the sibling pane. The
   // value check prevents the sibling's own scroll event from looping back.
+  // Also triggers infinite-scroll pagination when we get close to the bottom
+  // of the currently-loaded rows.
   function onScroll() {
     const me = scrollRef.current;
     const sibling = siblingScrollRef.current;
     if (!me || !sibling) return;
     if (sibling.scrollTop !== me.scrollTop) sibling.scrollTop = me.scrollTop;
     if (sibling.scrollLeft !== me.scrollLeft) sibling.scrollLeft = me.scrollLeft;
+    if (
+      onNearBottom
+      && me.scrollTop + me.clientHeight >= me.scrollHeight - NEAR_BOTTOM_PX
+    ) {
+      onNearBottom();
+    }
   }
 
   const toneClasses =
@@ -109,7 +126,7 @@ export function CubePane({
         </div>
 
         {/* Virtualized rows */}
-        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+        <div style={{ height: virtualizer.getTotalSize() + (isLoadingMore ? ROW_H : 0), position: "relative" }}>
           {virtualizer.getVirtualItems().map((vrow) => {
             const { row, originalIdx } = rows[vrow.index];
             return (
@@ -154,6 +171,18 @@ export function CubePane({
               </div>
             );
           })}
+          {isLoadingMore && (
+            <div
+              className="absolute left-0 right-0 flex items-center justify-center text-xs text-muted-foreground"
+              style={{
+                top: virtualizer.getTotalSize(),
+                height: ROW_H,
+                minWidth: minRowWidth,
+              }}
+            >
+              Loading more rows…
+            </div>
+          )}
         </div>
       </div>
     </div>
