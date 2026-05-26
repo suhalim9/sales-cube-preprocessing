@@ -206,8 +206,32 @@ export function ReviewStage({
     }
     return d.suggested_fix;
   }
+  // Capture the *effective* attribution at stage time. From "All" with no
+  // explicit tab context we still need an attribution so the staged-changes
+  // bar highlights the right button and the audit log credits the right
+  // detector. Logic mirrors the backend ``_attribute`` priority:
+  // - refund wins over negative on a set_to_zero against a refund-flagged
+  //   cell (refund cascade fires, so the action is semantically "refund")
+  // - double_booking owns split_evenly
+  // - outlier owns keep_as_is
+  // - otherwise fall back to the first detector that flagged the cell
+  function attributionFor(d: Detection, fix: SuggestedFix): AnomalyType | undefined {
+    if (stagingAttribution && d.flagged_by.includes(stagingAttribution)) {
+      return stagingAttribution;
+    }
+    const priorityByFix: Record<SuggestedFix, AnomalyType[]> = {
+      set_to_zero: ["refund", "negative", "outlier"],
+      split_evenly: ["double_booking"],
+      keep_as_is: ["outlier", "negative", "refund", "double_booking"],
+    };
+    for (const t of priorityByFix[fix]) {
+      if (d.flagged_by.includes(t)) return t;
+    }
+    return d.flagged_by[0];
+  }
   function onCellClick(d: Detection) {
-    sel.toggle(d.detection_id, defaultFixFor(d), d.flagged_by, stagingAttribution);
+    const fix = defaultFixFor(d);
+    sel.toggle(d.detection_id, fix, d.flagged_by, attributionFor(d, fix));
   }
 
   function pickFix(
@@ -224,11 +248,14 @@ export function ReviewStage({
   function stageAllVisible() {
     // Same tab-context logic as single-cell click: "Stage all" inside the
     // Double-bookings tab should stage every cell as split_evenly, not as
-    // whatever the merged suggested_fix says.
+    // whatever the merged suggested_fix says. Attribution also resolved per
+    // selection so the audit log and the bar's highlight agree with the
+    // actual behavior (e.g., refund cascade ⇒ attribution "refund").
     sel.stageMany(
-      filteredDetections.map(
-        (d) => [d.detection_id, defaultFixFor(d), d.flagged_by, stagingAttribution],
-      ),
+      filteredDetections.map((d) => {
+        const fix = defaultFixFor(d);
+        return [d.detection_id, fix, d.flagged_by, attributionFor(d, fix)];
+      }),
     );
   }
   function unstageAllVisible() {
